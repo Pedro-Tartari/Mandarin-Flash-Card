@@ -60,14 +60,17 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 - Milestone 1 (TS project skeleton) — done
 - Milestone 2 (Postgres running locally, own user/db) — done
 - Milestone 3 (first migration) — in progress
-- Repo is not yet a git repository, and there is no `.gitignore` yet — add one before the
-  first commit, with `.env` and `node_modules/` in it
-- `src/index.ts` is currently just a 3-line stub; `src/test-conection.ts` (note the existing
-  typo in the filename) is a zero-byte placeholder for the `pg` connection test
+- Git repo initialized on branch `main`, identity configured, first commit made
+  (`chore:` prefix — following Conventional Commits). `.gitignore` covers `.env`,
+  `node_modules/`, `dist/`, `.claude/`
+- `.gitignore` does NOT yet handle the `.env` *family* (`.env.local`, `.env.test`) or
+  re-include a committed `.env.example` — deliberately deferred until those files exist
+- `src/index.ts` is currently just a 3-line stub; `src/test-conection.ts` was deleted before
+  the first commit (it had a hardcoded DB password, so the credential never entered git
+  history) — the `pg` connection code needs rewriting against a config module
 - No `.env` or config module exists yet — anything touching `pg` needs connection details
   supplied before it can run
-- `package.json` currently still says `"type": "commonjs"` — the decision to switch to
-  `"type": "module"` (see Decisions log) has not been applied to the file yet
+- `node-pg-migrate` is not installed yet; no `migrations/` directory exists
 
 ## Commands
 ```bash
@@ -138,3 +141,4 @@ Session log
 <!-- One entry per work session. Fill in date, rough time spent, and what got done. --> <!-- Session boundary convention: I say "start studies" to begin a session and "ending studies" to end one. On "ending studies," ask me for rough elapsed time (no live clock available) and a one-line summary, then add/update the entry for that date below. -->
 
 2026-08-06 — ~3 hrs — Milestones 1 & 2 completed; started Milestone 3 (connection layer proven working end-to-end with pg, ESM switch applied, credentials still hardcoded — .env move pending)
+2026-08-07 — ~1.5 hrs — Git foundations: repo init, `.gitignore` (.env, node_modules/, dist/, .claude/), identity config, master→main rename, first commit with Conventional Commits prefix. Deleted test-conection.ts pre-commit to keep the hardcoded password out of git history. Covered: newline vs the `\n` notation, gitignore verification with `git check-ignore -v` / `od -c`, reading staged changes before committing. .env-family gitignore rules deferred until env files exist. Next: secrets into .env + config module, then install node-pg-migrate and write the first migration.
