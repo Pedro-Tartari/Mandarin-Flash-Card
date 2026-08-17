@@ -59,18 +59,47 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 ## Current status
 - Milestone 1 (TS project skeleton) — done
 - Milestone 2 (Postgres running locally, own user/db) — done
-- Milestone 3 (first migration) — in progress
-- Git repo initialized on branch `main`, identity configured, first commit made
-  (`chore:` prefix — following Conventional Commits). `.gitignore` covers `.env`,
-  `node_modules/`, `dist/`, `.claude/`
-- `.gitignore` does NOT yet handle the `.env` *family* (`.env.local`, `.env.test`) or
-  re-include a committed `.env.example` — deliberately deferred until those files exist
-- `src/index.ts` is currently just a 3-line stub; `src/test-conection.ts` was deleted before
-  the first commit (it had a hardcoded DB password, so the credential never entered git
-  history) — the `pg` connection code needs rewriting against a config module
-- No `.env` or config module exists yet — anything touching `pg` needs connection details
-  supplied before it can run
-- `node-pg-migrate` is not installed yet; no `migrations/` directory exists
+- Milestone 3 (first migration) — done
+- Milestone 4 (Express + `GET /words`) — **Phase 1 done (server boots and responds),
+  Phase 2 (the four layers) not started**
+- Git repo on branch `main`, two commits, both Conventional Commits style. **All Milestone 4
+  work so far is UNCOMMITTED.** `.gitignore` covers `.env*` with a `!.env.example` negation,
+  plus `node_modules/`, `dist/`, `.claude/`
+- `.env` exists and is ignored; `.env.example` documents the keys and IS committed.
+  `.env.test` / `.env.local` don't exist yet but are already covered by the rule
+- `src/config/env.ts` — the ONLY module in the project that reads `process.env`. Exports
+  `requireEnv(key): string` (throws, naming the variable, on missing/empty), a private
+  `requireEnvNumber(key): number` built on top of it, `dbConfig` (keyed for `pg`), and
+  `serverConfig` (`{ port }`) — deliberately a separate export, since `dbConfig` describes an
+  external service while `serverConfig` describes this process
+- `src/db/pool.ts` — 4 lines: imports `dbConfig`, exports a shared `Pool`. No side effects
+  on import
+- `src/app.ts` — builds and `export default`s the Express app. Has one throwaway route
+  `GET /` responding `res.send('Server connected')`. Correctly knows nothing about the port
+- `src/index.ts` — bootstrap only: imports `app` + `serverConfig`, calls `app.listen`, logs
+  the URL from the listen callback. Verified working: 200 in ~2ms
+- `words` table currently holds ONE seeded row (`你好`, with `pinyin` /
+  `example_sentence` / `tocfl_level` all NULL). Add 2+ more (at least one fully populated)
+  before building `GET /words`, or list-vs-single bugs will be invisible
+- OPEN — `res.send('Server connected')` returns `Content-Type: text/html`. Should be
+  `res.json()` for an API. `res.send` only sets JSON when handed an object/array
+- OPEN — the health route is mounted at `/`, not `/health`, so `/` isn't free for a service
+  index later. Deliberate choice or leftover, Pedro's call
+- OPEN — `.env` contains `DATABASE_URL` (needed by `node-pg-migrate`) but `.env.example` does
+  NOT document it, so a fresh clone can't run migrations. It also duplicates the `DB_*` vars,
+  giving two sources of truth for one connection. Fix by documenting it, or by building the
+  URL from the `DB_*` parts
+- OPEN — 404s and DB-down errors still return Express's default HTML. Phase 3 work
+- `noUnusedLocals` / `noUnusedParameters` are commented out in `tsconfig.json`. An unused
+  `serverConfig` import survived in `app.ts` for a full review cycle because of this —
+  worth enabling
+- RESOLVED this session: the `NaN` port gap (`requireEnvNumber` now guards both `DB_PORT`
+  and `PORT`); the untracked `test` table (dropped manually in psql — correct call, since no
+  migration ever created it, so the migration history was already accurate); `"types": []`
+  in tsconfig is now `["node"]`, so `process` no longer resolves by accident through
+  `@types/pg`
+- `migrations/` exists at the repo root with one applied migration (`words`); `node-pg-migrate`
+  tracks applied state in a `pgmigrations` table inside the database, not in the repo
 
 ## Commands
 ```bash
@@ -132,6 +161,32 @@ wired to anything yet; the project currently only runs as a Node script via `tsx
 - `npm install` may warn that `esbuild` (a `tsx` dependency) has an unapproved postinstall
   script — currently benign since the binary installs fine, but a fresh `npm ci` may need
   `npm approve-scripts esbuild`
+- **This project is on Express 5, but nearly every tutorial online is Express 4.** In v5 an
+  `async` handler that rejects is forwarded to the error middleware automatically — no
+  `try/catch` in every handler, no `asyncHandler` wrapper. If a tutorial hands you one, that's
+  a v4 tell. Also v5: bare `*` wildcard routes are invalid (need a name, e.g. `/*splat`)
+- `tsc` accepts code that is functionally broken: a route handler that never calls
+  `res.json()`/`res.send()`/`res.end()` typechecks fine (handlers may legally return `void`)
+  and the request just **hangs** with no error anywhere. A missing `export` is invisible to
+  the compiler for the same reason. For HTTP work the real gate is `curl`, not `npm run typecheck`
+- `res.send()` is polymorphic: a **string** argument sets `Content-Type: text/html`, an
+  object/array sets `application/json`. Use `res.json()` explicitly in an API so the intent
+  isn't inferred from the argument type
+- `res.render()` is for server-side HTML templating and needs a view engine configured — it is
+  the wrong tool for this API-first project and throws "No default engine was specified"
+- Postgres folds **column** identifiers to lowercase too, not just users/databases:
+  `CREATE TABLE t (exampleSentence TEXT)` silently stores `examplesentence`, no warning.
+  Quoting (`"exampleSentence"`) preserves case but then EVERY reference must stay quoted
+  forever, including aliases (`AS "exampleSentence"`). Decision made: keep `snake_case` in the
+  DB and translate to camelCase in code
+- `pg` returns Postgres `bigint` as a JavaScript **string**, not a number — so `COUNT(*)`,
+  `SUM()`, and any `BIGINT` column come back as e.g. `'0'`. Deliberate, to avoid silent
+  precision loss past `Number.MAX_SAFE_INTEGER`. Convert explicitly; `"10" < "9"` is `true`
+- TEMP tables are session-scoped, so they are invisible via `pool.query()` (which may pick a
+  different connection per statement) — hold one client from `pool.connect()` to use them
+- Node decides CommonJS vs ESM from file location + nearest `package.json`, not from the code.
+  A `.ts` file outside this project (e.g. in `/tmp`) defaults to CJS and rejects top-level
+  `await`; `.mts` forces ESM
 
 ## Feature ideas backlog
 <!-- Empty for now. As we move through milestones, options get proposed here and I pick which
@@ -142,3 +197,19 @@ Session log
 
 2026-08-06 — ~3 hrs — Milestones 1 & 2 completed; started Milestone 3 (connection layer proven working end-to-end with pg, ESM switch applied, credentials still hardcoded — .env move pending)
 2026-08-07 — ~1.5 hrs — Git foundations: repo init, `.gitignore` (.env, node_modules/, dist/, .claude/), identity config, master→main rename, first commit with Conventional Commits prefix. Deleted test-conection.ts pre-commit to keep the hardcoded password out of git history. Covered: newline vs the `\n` notation, gitignore verification with `git check-ignore -v` / `od -c`, reading staged changes before committing. .env-family gitignore rules deferred until env files exist. Next: secrets into .env + config module, then install node-pg-migrate and write the first migration.
+2026-08-12 — ~3 hrs — Milestone 3 finished: first migration (`words`, raw SQL via `pgm.sql`, IDENTITY pk, TOCFL levels) round-tripped up/down and verified against the live DB; env family gitignore + `.env.example`; extracted `config/env.ts` (fail-fast `requireEnv`) and `db/pool.ts` from the old connection file; `dotenv-cli` moved to devDeps. Committed as one `feat:` commit (a622c83). Covered: up/down semantics, `pgmigrations` tracking, template literals vs bare SQL, `VARCHAR` vs `TEXT` in Postgres, IDENTITY vs SERIAL, dependency sections, external-vs-internal naming boundaries, `NaN` coercion and why types can't catch it, Conventional Commits and atomic commit splitting. Open: `NaN` port validation. Next: Express + `GET /words`.
+2026-08-17 — ~?? hrs (elapsed time not captured — fill in) — Closed the `NaN` port gap with a
+`requireEnvNumber` helper composed on top of `requireEnv`, and added `serverConfig` as a separate
+export from `dbConfig`. Installed `express@5` + `@types/express`; fixed `"types": []` →
+`["node"]` in tsconfig so `process` no longer resolves by accident through `@types/pg`. Dropped
+the untracked `test` table (manually in psql — justified, since no migration ever created it).
+Seeded one `words` row. Milestone 4 Phase 1 done: `app.ts` exports the app and owns no port,
+`index.ts` bootstraps and listens, verified with `curl` (200 in ~2ms). Covered: Pool laziness and
+the 50ms→1ms handshake saving, connection reuse by backend PID, `pool.query()` result shape,
+`bigint`-as-string, `pgmigrations` as ledger vs repo as instructions, IDENTITY's hidden sequence
+and non-rollback, schema drift, migrations-are-DDL-not-data, Postgres identifier case folding,
+`res.send` vs `res.json` vs `res.render`, export/import pairing, and why `tsc` passing proves
+nothing about a hanging handler. Open: `res.send`→`res.json`, `/`→`/health`, undocumented
+`DATABASE_URL` in `.env.example`, `hanzi` UNIQUE decision, seed 2+ more words. **Nothing
+committed yet.** Next: Milestone 4 Phase 2 — `types/word.ts`, then service → controller → route,
+built bottom-up.

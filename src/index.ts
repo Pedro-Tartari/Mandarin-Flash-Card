@@ -1,3 +1,8 @@
-const name = 'Pedro';
+import {serverConfig} from "./config/env.js";
+import app from './app.js'
 
-console.log (name)
+const PORT = serverConfig.port;
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
