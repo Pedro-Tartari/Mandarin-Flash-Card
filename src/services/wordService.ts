@@ -31,3 +31,23 @@ export async function getAllWords(): Promise<Word[]> {
 
   return result.rows.map(toWord);
 }
+
+export async function getWordById(id: number): Promise<Word | null> {
+   const result = await pool.query<WordRow>(`
+    SELECT 
+    id, 
+    hanzi, 
+    zhuyin, 
+    pinyin, 
+    meaning,
+    example_sentence, 
+    tocfl_level 
+    FROM words 
+    WHERE id = $1`, [id]);
+
+    const row = result.rows[0];
+    if (row === undefined) {
+      return null;
+    } 
+  return toWord(row);
+} 

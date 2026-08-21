@@ -60,10 +60,13 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 - Milestone 1 (TS project skeleton) — done
 - Milestone 2 (Postgres running locally, own user/db) — done
 - Milestone 3 (first migration) — done
-- Milestone 4 (Express + `GET /words`) — **DONE. Full stack wired and verified with `curl`:
-  route → controller → service → pool → Postgres, returning 200 `application/json` with all
-  9 words. Phase 3 (JSON 404s + error middleware) not started**
-- Git repo on branch `main`, four commits, all Conventional Commits style, all pushed to
+- Milestone 4 (Express + `GET /words`) — **FULLY DONE, all three phases. Route → controller →
+  service → pool → Postgres returns 200 `application/json` with all 9 words; 404s and 500s now
+  return JSON too. Verified end-to-end with `curl`, including a real DB failure**
+- Milestone 5 (`GET /words/:id`) — **IN PROGRESS. Service layer written and typechecking,
+  never executed. Controller and route not started**
+- Git repo on branch `main`, five commits, all Conventional Commits style; the latest
+  (`5640970`) is **ahead of `origin` by 1 — not yet pushed**. Remote is
   `origin` (github.com/Pedro-Tartari/Mandarin-Flash-Card). `.gitignore` covers `.env*` with a
   `!.env.example` negation, plus `node_modules/`, `dist/`, `.claude/`
 - No git credential helper, no SSH key, no `gh` CLI — every push needs a PAT typed by hand.
@@ -77,8 +80,15 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
   external service while `serverConfig` describes this process
 - `src/db/pool.ts` — 4 lines: imports `dbConfig`, exports a shared `Pool`. No side effects
   on import
-- `src/app.ts` — builds and `export default`s the Express app. Has one throwaway route
-  `GET /` responding `res.send('Server connected')`. Correctly knows nothing about the port
+- `src/app.ts` — builds and `export default`s the Express app, knows nothing about the port.
+  Five things in strict order, because in Express **line order is control flow**:
+  (1) `app.use("/words", wordRoutes)`, (2) `app.get("/health", ...)` → `{ status: "ok" }`,
+  (3) a pathless `app.use((req, res) => ...)` catch-all returning a JSON 404 whose message
+  interpolates `req.method` and `req.originalUrl`, (4) a four-parameter
+  `app.use((err: unknown, req, res, next) => ...)` error handler that `console.error`s the real
+  error and sends a generic JSON 500, (5) `export default app`. Also imports Express's
+  `Request`/`Response`/`NextFunction` as a separate `import type` line — the four-param arrow
+  gets no contextual typing from `app.use`'s overloads, so without annotations it is `TS7006`
 - `src/index.ts` — bootstrap only: imports `app` + `serverConfig`, calls `app.listen`, logs
   the URL from the listen callback. Verified working: 200 in ~2ms
 - `src/types/word.ts` — types ONLY, no runtime code, so every export erases at compile time.
@@ -91,6 +101,12 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
   `getAllWords(): Promise<Word[]>`. **Verified at runtime** against the real DB — returns all
   9 rows with every field correctly mapped. Query uses an explicit 7-column list (not
   `SELECT *`) and `ORDER BY tocfl_level NULLS LAST, id`
+- `src/services/wordService.ts` also has `getWordById(id: number): Promise<Word | null>` —
+  same 7-column list, `WHERE id = $1` with `[id]` as the values array, no `ORDER BY` (one row
+  can't be sorted). Body is `const row = result.rows[0]` → `if (row === undefined) return null`
+  → `return toWord(row)`. **Typechecks but has NEVER been executed** — the SQL and the values
+  array are unproven. Takes `number`, not `string`, which deliberately pushes URL parsing and
+  the "what if it's `abc`" question up into the controller
 - `words` table holds 9 seeded rows, deliberately uneven: some have `example_sentence` and
   `tocfl_level`, none have `pinyin`. Good fixture set — a mapper that mishandles NULL or a
   type that lies about nullability will show up in the response body
@@ -105,20 +121,22 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 - OPEN — moving `toWord` into the service forced `WordRow` to stay exported from
   `types/word.ts`. Trade-off accepted for now; a third layout (row type declared inside the
   service, `types/` holding only `Word`) would give both privacy and a type-only types file
-- OPEN — the health route now uses `res.json('Server connected')`, so the `Content-Type` is
-  finally correct, but the body is a bare JSON string (`"Server connected"`, quotes included).
-  Most APIs send an object here (`{ status: 'ok' }`) so clients get a stable shape and fields
-  can be added without breaking them
-- OPEN — the health route is mounted at `/`, not `/health`, so `/` isn't free for a service
-  index later. Deliberate choice or leftover, Pedro's call
+- OPEN — cosmetics on the 404 handler line in `app.ts`: a trailing space inside the template
+  literal (`does not exist `) and quoted object keys (`"error"`, `"code"`) where bare
+  identifiers are the convention. Flagged three times, left for Pedro. A formatter (Prettier)
+  would also fix the mixed 2/4-space indentation now in `getWordById`
 - OPEN — `.env.example` now documents `DATABASE_URL`, so a fresh clone can run migrations.
   It still duplicates the `DB_*` vars though, so there remain two sources of truth for one
   connection. Could be collapsed by building the URL from the `DB_*` parts
-- OPEN — 404s and DB-down errors still return Express's default HTML. Confirmed by `curl`:
-  `GET /words/1` returns a 404 with `Content-Type: text/html` and a full HTML error page from
-  Express's `finalhandler`. A JS client calling `await res.json()` on that throws
-  `SyntaxError: Unexpected token '<'` — a message that says nothing about the real problem.
-  Fix is a catch-all 404 handler plus error middleware, both returning JSON. Phase 3 work
+- Error envelope, decided 2026-08-21 and used by BOTH handlers:
+  `{ error: { code: "NOT_FOUND" | "INTERNAL_ERROR", message: "..." } }`. Chosen over a bare
+  `{ error: "..." }` (no machine-readable signal beyond the HTTP status) and over RFC 9457
+  Problem Details (standard, worth knowing for the European market, too heavy here).
+  **Whatever `GET /words/:id` returns for a missing word must reuse this shape** — and probably
+  wants a code that distinguishes "route doesn't exist" from "word doesn't exist"
+- The 500 handler sends a generic message outward and `console.error(err)`s inward, so schema
+  and file paths never reach the client. Natural upgrade later is a correlation id: log it with
+  the stack, send just the id, user quotes `ref: 7f3a9c` in a bug report
 - OPEN — `hanzi` has no UNIQUE constraint. Now coupled to the `ORDER BY` tiebreaker decision:
   `id` was chosen precisely because it is unique by construction and `hanzi` is not
 - `noUnusedLocals` / `noUnusedParameters` are commented out in `tsconfig.json`, and
@@ -270,6 +288,29 @@ wired to anything yet; the project currently only runs as a Node script via `tsx
   binding didn't exist — two different failure stages
 - A `Pool` keeps an idle client (and therefore a socket) open, so a standalone script does not
   exit immediately after its last query — the event loop stays alive until the idle timeout
+- **`${...}` only interpolates inside backticks.** In a double-quoted string it is six ordinary
+  characters, so `"Route GET ${url}"` ships the literal text `${url}` to the client. `tsc` is
+  green — it is a perfectly valid string. Same class of bug: a value that *looks* dynamic but
+  is hardcoded (`GET` written outside the braces reported every `POST` as a `GET`)
+- **Express classifies middleware by arity, not by keyword.** Four parameters
+  `(err, req, res, next)` = error handler; three or fewer = normal middleware. There is no
+  other signal. The unused `next` is therefore load-bearing — deleting it silently demotes the
+  function to normal middleware that never runs. Relevant when `noUnusedParameters` is enabled:
+  rename to `_next`, never delete
+- **`app.use(fn)` with no path matches every request.** That is what makes the catch-all 404
+  work, and it is why registration order is real control flow: the same three lines placed
+  above `app.use("/words", ...)` would 404 `/words` itself, with nothing in the code looking
+  wrong
+- A four-parameter arrow written inline in `app.use(...)` gets **no contextual typing** —
+  overload resolution can't settle on `ErrorRequestHandler`, so under `noImplicitAny` every
+  parameter is `TS7006`. Annotate them from Express's `Request`/`Response`/`NextFunction`,
+  imported as a separate `import type` line (`verbatimModuleSyntax`). Two params infer fine
+- The values array in `pool.query(sql, values)` is **optional in the type signature**, so
+  omitting it while the SQL contains `$1` typechecks clean and fails only at runtime. Another
+  boundary `tsc` cannot see
+- A declared return type is what lets the compiler hold you to a contract *before* the body
+  exists: an empty body under `Promise<Word | null>` errors immediately, whereas omitting the
+  annotation infers `Promise<void>` and every caller silently receives `undefined`
 
 ## Feature ideas backlog
 <!-- Empty for now. As we move through milestones, options get proposed here and I pick which
@@ -388,3 +429,54 @@ actually felt). Pedro asked to be reminded when implementation time arrives.
 Nothing committed yet. Next: commit (consider splitting layers from HTTP wiring), then
 Milestone 4 Phase 3 — JSON 404 handler and error middleware, plus the health-route body shape
 and `/` vs `/health` decision.
+
+2026-08-21 — ~3 hrs — **Milestone 4 fully closed (Phase 3), Milestone 5 started.** Session opened
+with a quiz on prior work: 4/5 with prompting. The consistent weak spot was *why the compiler
+can't help* — the answer "runtime errors" describes when the bugs appear, not why `tsc` is blind,
+which is that every one of them lives at a boundary (`pool.query<T>()` is an unchecked assertion,
+`res.json()` takes `any`, row order isn't in the type system at all). Worth re-quizzing.
+
+Both failure paths were reproduced live before building anything, which made the fix concrete:
+`GET /words/1` → HTML 404 from `finalhandler`; then the SQL was deliberately sabotaged
+(`hanzi` → `hanzii`) → HTML **500 carrying a full stack trace with absolute filesystem paths**.
+That second one also answered the "does an awaited rejection crash the process?" question —
+it does not; `await` is what routes it to Express instead of killing Node.
+
+Built in `app.ts`, in order: a pathless catch-all JSON 404, then a four-param JSON 500 handler,
+then `/` → `/health` returning `{ status: "ok" }`. Verified with `curl` across the full matrix
+(200 / 404 GET / 404 POST / 500 on a real DB failure), then the sabotage was reverted and `/words`
+confirmed back at 200. Committed as `5640970 feat: return JSON for 404 and error` — **not yet
+pushed, `main` is ahead of `origin` by 1**.
+
+Decisions made: error envelope `{ error: { code, message } }` — chosen over a bare string (no
+machine-readable signal) and over RFC 9457 (standard, worth knowing, too heavy here); generic
+message outward + `console.error` inward, so schema names never reach a client; `err: unknown`
+rather than `Error` (a lie — anything can be thrown) or `any`, and it costs nothing because the
+body never touches `err`'s properties; `/` deliberately left to 404 so it stays free for a
+service index or an `/api` mount.
+
+Five bugs this session, **every one with `npm run typecheck` green** — the same through-line as
+2026-08-20, now five sessions of evidence: (1) the 404 message hardcoded `"Route GET /words/1"`,
+so every 404 confidently reported the wrong route; (2) fixing it with double quotes shipped the
+literal characters `${url}`, because `${}` only interpolates inside backticks; (3) `GET` left
+outside the braces reported a `POST` as a `GET`; (4) an empty handler body made the request
+**hang forever** with no error anywhere — worse than the HTML page it replaced; (5) `WHERE id = $1`
+written with no values array. The one place TypeScript *did* help was `noUncheckedIndexedAccess`
+forcing `result.rows[0]` to be `WordRow | undefined` — note that it helped precisely where the
+data had already crossed into the program.
+
+Milestone 5 begun bottom-up: `getWordById(id: number): Promise<Word | null>` written and
+typechecking, using the contract-first rhythm (name → params → return → steps, one line at a
+time, typecheck between). The return type was reasoned out properly — `Promise<Word>` is a
+promise you can't keep, since a single lookup has no equivalent of `[]`. **It has never run.**
+
+Process note: Pedro twice asked "show me" and once "choose and make the update". Handled by
+showing the pattern in an unrelated domain (`getUserByEmail`) so nothing was directly pasteable,
+except the error-handler body which was written directly on explicit request and flagged as
+stepping outside the usual guidance-only rule. That split seemed to work — worth repeating.
+
+Next: the controller for `GET /words/:id`. Pedro had just been asked to name its **three**
+possible responses before writing code — (1) `id` not a number → malformed request, (2) service
+returns `null` → valid request, no such word, (3) success — and to decide between `Number()` and
+`parseInt()` and which status code each case gets. Then the route (`router.get("/:id", ...)`),
+then `curl` to finally prove the SQL. Also pending: `git push` (1 commit ahead).
