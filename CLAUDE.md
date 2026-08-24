@@ -63,10 +63,13 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 - Milestone 4 (Express + `GET /words`) — **FULLY DONE, all three phases. Route → controller →
   service → pool → Postgres returns 200 `application/json` with all 9 words; 404s and 500s now
   return JSON too. Verified end-to-end with `curl`, including a real DB failure**
-- Milestone 5 (`GET /words/:id`) — **IN PROGRESS. Service layer written and typechecking,
-  never executed. Controller and route not started**
-- Git repo on branch `main`, five commits, all Conventional Commits style; the latest
-  (`5640970`) is **ahead of `origin` by 1 — not yet pushed**. Remote is
+- Milestone 5 (`GET /words/:id`) — **DONE. Route → controller → service → Postgres verified
+  with `curl` across all four cases: 200 (single object), 404 `WORD_NOT_FOUND`, 400
+  `INVALID_ID` for `abc`, 400 for `1.5`. `getWordById` has now actually executed**
+- Git repo on branch `main`, seven commits; the latest (`e00ca1c`) is **ahead of `origin`
+  by 1 — not yet pushed**. `7146ac3 start getWordsById` is the one message that breaks the
+  Conventional Commits pattern (no type prefix, and it names a function that doesn't exist) —
+  already pushed, so left alone rather than force-pushing a message fix. Remote is
   `origin` (github.com/Pedro-Tartari/Mandarin-Flash-Card). `.gitignore` covers `.env*` with a
   `!.env.example` negation, plus `node_modules/`, `dist/`, `.claude/`
 - No git credential helper, no SSH key, no `gh` CLI — every push needs a PAT typed by hand.
@@ -104,9 +107,10 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 - `src/services/wordService.ts` also has `getWordById(id: number): Promise<Word | null>` —
   same 7-column list, `WHERE id = $1` with `[id]` as the values array, no `ORDER BY` (one row
   can't be sorted). Body is `const row = result.rows[0]` → `if (row === undefined) return null`
-  → `return toWord(row)`. **Typechecks but has NEVER been executed** — the SQL and the values
-  array are unproven. Takes `number`, not `string`, which deliberately pushes URL parsing and
-  the "what if it's `abc`" question up into the controller
+  → `return toWord(row)`. **Verified at runtime 2026-08-24** — `WHERE id = $1` with `[id]`
+  returns the right row, and a missing id resolves to `null`. Takes `number`, not `string`,
+  which deliberately pushes URL parsing and the "what if it's `abc`" question up into the
+  controller
 - `words` table holds 9 seeded rows, deliberately uneven: some have `example_sentence` and
   `tocfl_level`, none have `pinyin`. Good fixture set — a mapper that mishandles NULL or a
   type that lies about nullability will show up in the response body
@@ -114,10 +118,20 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
   Three lines of body: `await getAllWords()`, then `res.status(200).json(...)`. No `pool`, no
   SQL, no `try/catch` (Express 5 forwards a rejected async handler to error middleware itself).
   `req` is unused — the endpoint takes no input
-- `src/routes/wordRoutes.ts` — `Router()` instance, `router.get("/", getAllWordsController)`,
-  `export default router`. Deliberately registers `"/"` and NOT `"/words"`: the prefix lives
-  once, in `app.use("/words", wordRoutes)` in `app.ts`, so `GET /words/:id` later is just
-  `"/:id"` and moving everything under `/api` is a one-word edit
+- `src/controllers/wordController.ts` also has `getWordByIdController(req, res)`, written in
+  **guard-clause style**: three exits, each one `return`ing after it responds, so the success
+  path stays at the function's top indentation level. `Number(req.params.id)` then
+  `if (!Number.isInteger(id))` → 400 `INVALID_ID`; `await getWordById(id)` then
+  `if (word === null)` → 404 `WORD_NOT_FOUND`; otherwise `res.status(200).json(word)` — the
+  **bare word object**, not wrapped, matching `/words` sending a bare array. The 400 message
+  echoes the raw `idParam` (there is no valid number to show yet); the 404 message uses the
+  parsed `id`
+- `src/routes/wordRoutes.ts` — `Router()` instance, `router.get("/", getAllWordsController)`
+  and `router.get("/:id", getWordByIdController)`, `export default router`. Deliberately
+  registers `"/"` and `"/:id"` and NOT `"/words/..."`: the prefix lives once, in
+  `app.use("/words", wordRoutes)` in `app.ts`, so moving everything under `/api` is a one-word
+  edit. Express matches top to bottom, first match wins — any future literal segment
+  (`/search`, `/random`) MUST be registered above `"/:id"` or `:id` swallows it
 - OPEN — moving `toWord` into the service forced `WordRow` to stay exported from
   `types/word.ts`. Trade-off accepted for now; a third layout (row type declared inside the
   service, `types/` holding only `Word`) would give both privacy and a type-only types file
@@ -311,6 +325,25 @@ wired to anything yet; the project currently only runs as a Node script via `tsx
 - A declared return type is what lets the compiler hold you to a contract *before* the body
   exists: an empty body under `Promise<Word | null>` errors immediately, whereas omitting the
   annotation infers `Promise<void>` and every caller silently receives `undefined`
+- **`Number()` accepts `any`, so it makes type errors disappear without solving them.**
+  `req.params.id` is typed `string | string[] | undefined` under `noUncheckedIndexedAccess`;
+  passing it to `parseInt` is a `TS2345`, passing it to `Number` is silently fine. The error
+  vanishing is not the same as the value being narrowed. When a type error goes away after a
+  change, always ask: did I narrow it, or did I hand it to a function that doesn't care?
+- `parseInt` parses a **prefix** and discards the rest — `parseInt("7cats")` is `7`, so a
+  `parseInt`-guarded route happily serves word 7 for `/words/7cats`. `Number()` demands the
+  whole string. Guard the result with `Number.isNaN` (never `typeof`, since
+  `typeof NaN === "number"`), or better `Number.isInteger`, which also rejects `1.5`, `1e3`,
+  `0x10`, `""` and `" "` — all of which pass `isNaN` and would reach `WHERE id = $1` and
+  turn a client mistake into a 500
+- **An inverted condition is perfectly typed.** `if (Number.isInteger(id))` guarding the
+  *failure* branch returns `boolean` into an `if` — `tsc` is green and the endpoint is exactly
+  backwards. Types check shape, never meaning
+- `res.json()` sends the response but does **not** exit the function. Without a `return`, a
+  guard clause falls through: either nothing else responds (request hangs) or a second send
+  throws `ERR_HTTP_HEADERS_SENT`. Neither is visible to `tsc`
+- Express matches routes **top to bottom, first match wins**. A literal path registered below
+  `"/:id"` is unreachable — `/words/search` gets looked up as a word with id `"search"`
 
 ## Feature ideas backlog
 <!-- Empty for now. As we move through milestones, options get proposed here and I pick which
@@ -480,3 +513,64 @@ possible responses before writing code — (1) `id` not a number → malformed r
 returns `null` → valid request, no such word, (3) success — and to decide between `Number()` and
 `parseInt()` and which status code each case gets. Then the route (`router.get("/:id", ...)`),
 then `curl` to finally prove the SQL. Also pending: `git push` (1 commit ahead).
+
+2026-08-24 — ~2 hrs — **Milestone 5 done: `GET /words/:id` works end to end.** Session opened
+with a five-question quiz on prior work: 3.5/5. Correct on Express arity (4 params = error
+handler) and on `string | null` vs `?:`. Half credit on router mounting — the *why* was right
+(the prefix lives in `app.use`) but the mechanism was missing: `app.use(prefix, router)`
+**strips** the prefix, so `/words/7` arrives inside the router as `/7`. Two real misses:
+(a) `getWordById` returning `Promise<Word | null>` was explained as "the connection might
+fail" — wrong, a DB error *rejects* the promise; `null` means the query succeeded and no row
+matched, and `getAllWords` needs no `null` because `[]` is already the empty answer;
+(b) the "why is `tsc` blind" question, now missed **twice in a row** — the answer is not
+"runtime errors" (that's *when*) but that each bug sat at a boundary where TS was handed an
+assertion it can't verify: `pool.query<T>()` is a claim about a string, `res.json()` takes
+`any`, and the values array is optional in the signature. **Re-quiz this a third time.**
+
+Decisions made: 400 `INVALID_ID` for a malformed id vs 404 `WORD_NOT_FOUND` for a valid id
+with no row (4xx splits on *who has to change*: a 400 says "fix your request", a 404 says
+"your request was fine, that thing may exist later"); `WORD_NOT_FOUND` rather than reusing
+`NOT_FOUND`, which already means "that route doesn't exist" and keeps `USER_NOT_FOUND` honest
+later; `Number()` over `parseInt()`; `Number.isInteger` over `Number.isNaN`; success returns
+the **bare word object**, matching `/words` returning a bare array.
+
+Bugs this session, all with typecheck green except where noted: `parseInt(x) = true` (caught,
+`TS2364` — but the real problem was conceptual: `parseInt` returns a number, so even
+`=== true` would have been dead code that compiled); `Number.isInteger` guarding the failure
+branch, i.e. **exactly inverted** and perfectly typed; `code: "NOT A NUMBER"` with spaces,
+inconsistent with the `NOT_FOUND`/`INTERNAL_ERROR` family; a 400 message interpolating
+`idConvert`, which is `NaN` in that branch, so it read "ID NaN failed" instead of echoing what
+the client sent; `await getWordById(idConvert)` with the **result discarded**, so nothing could
+be tested for `null`. Biggest lesson: the `TS2345` on `req.params.id` disappeared not because
+it was fixed but because `Number()` accepts `any` — the seventh instance of the running
+boundary-blindness pattern, and the first time it manifested as an error *going away*.
+
+Verified with `curl` against all four cases and predictions made first (2/4 correct): `/words/1`
+was predicted to return "the array" — it returns a single **object**, since a collection
+endpoint and an item endpoint return different shapes; `/words/1.5` was predicted 404 but
+returns **400**, because `Number.isInteger` stops it before the database. That last one is the
+whole argument for `isInteger` over `isNaN` in one request. The response body also confirmed
+`"pinyin":null` present-with-null rather than a missing key — the `string | null` typing paying
+off visibly.
+
+Process note: Pedro hit a hard stall mid-session ("im lost", "just show me answer"). Escalation
+path that worked: line-by-line annotated review → one numbered step at a time → then, on
+explicit request, writing the finished controller directly, flagged as stepping outside the
+guidance-only rule (same handling as the error-handler body on 2026-08-21). The two structural
+steps *before* the stall (flatten the `else`, register the route) were both done correctly
+unaided — the block was on assembling the whole function, not on the pieces.
+
+Also: Claude killed Pedro's running `npm run dev` while cleaning up a server it thought it had
+started (its own `npm start` never bound — the port was already taken). Check `pgrep -f tsx`
+before killing anything in this project.
+
+Committed as `e00ca1c feat(api): expose GET /words/:id with 400 and 404 handling` — one atomic
+commit, deliberately not split, since the controller alone is dead code and the route alone
+would not compile. **Still ahead of `origin` by 1; `git push` pending.**
+
+Next: `git push` (needs a hand-typed PAT — `gh auth login` or an SSH remote is overdue). Then
+Milestone 6 — the first write endpoint, `POST /words`, which brings in `express.json()` body
+parsing, request-body validation as a genuinely new problem (a body has many fields that can
+each be wrong, unlike one path param), 201 + `Location`, and the `hanzi` UNIQUE decision that
+has been open for three sessions — a duplicate insert is a 409, and that only exists if the
+constraint does.
