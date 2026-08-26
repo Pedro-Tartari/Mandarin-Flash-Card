@@ -1,4 +1,4 @@
-import type { Word, WordRow } from "../types/word.js";
+import type { CreateWordInput, Word, WordRow } from "../types/word.js";
 import { pool } from "../db/pool.js";
 
 // Translates a DB row into the shape the rest of the app speaks.
@@ -33,7 +33,8 @@ export async function getAllWords(): Promise<Word[]> {
 }
 
 export async function getWordById(id: number): Promise<Word | null> {
-   const result = await pool.query<WordRow>(`
+  const result = await pool.query<WordRow>(
+    `
     SELECT 
     id, 
     hanzi, 
@@ -43,11 +44,41 @@ export async function getWordById(id: number): Promise<Word | null> {
     example_sentence, 
     tocfl_level 
     FROM words 
-    WHERE id = $1`, [id]);
+    WHERE id = $1`,
+    [id],
+  );
 
-    const row = result.rows[0];
-    if (row === undefined) {
-      return null;
-    } 
+  const row = result.rows[0];
+  if (row === undefined) {
+    return null;
+  }
   return toWord(row);
-} 
+}
+
+export async function createWord(input: CreateWordInput): Promise<Word> {
+  const result = await pool.query<WordRow>(
+    `
+    INSERT INTO words (hanzi, 
+    zhuyin, 
+    pinyin, 
+    meaning,
+    example_sentence, 
+    tocfl_level )
+    VALUES ($1, $2, $3, $4, $5, $6)
+    RETURNING id, hanzi, zhuyin, pinyin, meaning, example_sentence, tocfl_level 
+    `,
+    [
+      input.hanzi,
+      input.zhuyin,
+      input.pinyin ?? null,
+      input.meaning,
+      input.exampleSentence ?? null,
+      input.tocflLevel ?? null,
+    ],
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new Error("Insert succeeded but no row was returned");
+  }
+  return toWord(row);
+}

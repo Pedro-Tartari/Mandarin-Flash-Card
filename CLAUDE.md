@@ -66,8 +66,14 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 - Milestone 5 (`GET /words/:id`) — **DONE. Route → controller → service → Postgres verified
   with `curl` across all four cases: 200 (single object), 404 `WORD_NOT_FOUND`, 400
   `INVALID_ID` for `abc`, 400 for `1.5`. `getWordById` has now actually executed**
-- Git repo on branch `main`, seven commits; the latest (`e00ca1c`) is **ahead of `origin`
-  by 1 — not yet pushed**. `7146ac3 start getWordsById` is the one message that breaks the
+- Milestone 6 (`POST /words`) — **IN PROGRESS. Schema + type + service layers done and
+  verified; validation, controller, route and `express.json()` wiring not started.** The
+  `UNIQUE (hanzi, zhuyin)` migration is applied, `CreateWordInput` exists, and `createWord`
+  has executed against the real DB. A duplicate insert currently rejects out of the service
+  with an unhandled `23505`, so once the route exists it would surface as a 500 — the
+  `DuplicateWordError` translation is the next piece
+- Git repo on branch `main`, nine commits; `main` is level with `origin` (the Milestone 5
+  push went through). `7146ac3 start getWordsById` is the one message that breaks the
   Conventional Commits pattern (no type prefix, and it names a function that doesn't exist) —
   already pushed, so left alone rather than force-pushing a message fix. Remote is
   `origin` (github.com/Pedro-Tartari/Mandarin-Flash-Card). `.gitignore` covers `.env*` with a
@@ -99,6 +105,18 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
   (camelCase, what the API returns). Nullable columns are modelled `string | null`, NOT
   `field?: string` — a `NULL` from `pg` is a present key with a null value, and under
   `exactOptionalPropertyTypes` those are not interchangeable
+- `src/types/word.ts` also has `CreateWordInput` (added 2026-08-26) — what a client may SEND,
+  camelCase like `Word`. `hanzi`/`zhuyin`/`meaning` required (the three `NOT NULL` columns);
+  `pinyin`, `exampleSentence`, `tocflLevel` written `?: T | null`, which accepts both an absent
+  key ("no opinion") and an explicit `null` ("I know there is none") — a distinction
+  `exactOptionalPropertyTypes` preserves rather than flattens. Deliberately **not**
+  `Omit<Word, "id">`: `Word` describes what the API returns and `CreateWordInput` what it
+  accepts, and those diverge the moment the server owns a column (`created_at` would make
+  `Omit` demand it from clients, forcing an ever-growing exclusion list). Note it carries no
+  `id` — the column is `GENERATED ALWAYS`, so Postgres actively refuses a supplied value.
+  **A type constrains the service's callers only; it does nothing to a JSON body off the
+  network** — `express.json()` hands you `any`, so `{"hanzi": 42}` is a runtime validation
+  problem, not a compile-time one
 - `src/services/wordService.ts` — owns SQL, knows nothing about HTTP. Private `toWord(row)`
   mapper (deliberately NOT exported, so nothing can bypass the translation) plus
   `getAllWords(): Promise<Word[]>`. **Verified at runtime** against the real DB — returns all
@@ -111,6 +129,23 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
   returns the right row, and a missing id resolves to `null`. Takes `number`, not `string`,
   which deliberately pushes URL parsing and the "what if it's `abc`" question up into the
   controller
+- `src/services/wordService.ts` also has `createWord(input: CreateWordInput): Promise<Word>` —
+  parameterised `INSERT INTO words (hanzi, zhuyin, pinyin, meaning, example_sentence,
+  tocfl_level) VALUES ($1..$6)` with an explicit `RETURNING` list of the same 7 columns, so one
+  round trip yields the authoritative stored row (including the DB-assigned `id`) and it feeds
+  straight into `toWord`. The three optional fields are passed as `input.x ?? null`. Return
+  type is `Promise<Word>` with **no `| null`** — an INSERT either writes a row or throws, so
+  there is no "succeeded but found nothing". `result.rows[0]` is still `WordRow | undefined`
+  under `noUncheckedIndexedAccess`, and that impossible case is handled with an explicit
+  `throw new Error("Insert succeeded but no row was returned")` rather than a `!` assertion —
+  chosen so a broken invariant fails at the line where the assumption died, with a written
+  message, instead of as a `TypeError` inside `toWord`. **Verified at runtime 2026-08-26** —
+  inserted 火 as id 12. Does NOT yet catch `23505`
+- OPEN — the 7-column list is now duplicated **three times** in `wordService.ts`. A
+  `const WORD_COLUMNS = "id, hanzi, ..."` interpolated into all three queries would fix the
+  drift risk (a new column currently needs four edits, including `WordRow`, and missing one is
+  silent). Note the nuance that makes it safe: interpolating a constant you wrote is fine,
+  interpolating a value the client sent is injection
 - `words` table holds 9 seeded rows, deliberately uneven: some have `example_sentence` and
   `tocfl_level`, none have `pinyin`. Good fixture set — a mapper that mishandles NULL or a
   type that lies about nullability will show up in the response body
@@ -151,8 +186,17 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
 - The 500 handler sends a generic message outward and `console.error(err)`s inward, so schema
   and file paths never reach the client. Natural upgrade later is a correlation id: log it with
   the stack, send just the id, user quotes `ref: 7f3a9c` in a bug report
-- OPEN — `hanzi` has no UNIQUE constraint. Now coupled to the `ORDER BY` tiebreaker decision:
-  `id` was chosen precisely because it is unique by construction and `hanzi` is not
+- RESOLVED 2026-08-26 (open three sessions) — `words` now has a named composite constraint
+  `words_hanzi_zhuyin_unique UNIQUE (hanzi, zhuyin)`, added by migration
+  `1787752111219_add-unique-hanzi-zhuyin.js`. **Composite, not `UNIQUE (hanzi)`**, because of
+  多音字: 行 is `ㄒㄧㄥˊ` (to go) and `ㄏㄤˊ` (row/profession); 樂 is `ㄌㄜˋ` (happy) and `ㄩㄝˋ`
+  (music) — same character, different word, different flashcard. "A word" in this app means a
+  character *plus a reading*. `zhuyin` being `NOT NULL` is load-bearing: Postgres treats
+  `NULL != NULL`, so a nullable column in a UNIQUE constraint lets duplicates through silently
+  — `UNIQUE (hanzi, pinyin)` would have been useless, since every row has `pinyin IS NULL`.
+  Named explicitly rather than letting Postgres generate `words_hanzi_zhuyin_key`, so code can
+  branch on a name we chose. This does NOT disturb the `ORDER BY ... id` tiebreaker: `id` is
+  still the unique-by-construction column, `hanzi` alone still is not
 - `noUnusedLocals` / `noUnusedParameters` are commented out in `tsconfig.json`, and
   `allowUnreachableCode` is unset (so unreachable code is an editor warning, not an error).
   All three catch "compiles fine, means something you didn't intend" — an unused
@@ -163,8 +207,15 @@ and English → Hanzi/Bopomofo), with spaced repetition based on right/wrong his
   migration ever created it, so the migration history was already accurate); `"types": []`
   in tsconfig is now `["node"]`, so `process` no longer resolves by accident through
   `@types/pg`
-- `migrations/` exists at the repo root with one applied migration (`words`); `node-pg-migrate`
-  tracks applied state in a `pgmigrations` table inside the database, not in the repo
+- `migrations/` exists at the repo root with **two** applied migrations (create `words`, then
+  the `(hanzi, zhuyin)` unique constraint); `node-pg-migrate` tracks applied state in a
+  `pgmigrations` table inside the database, not in the repo
+- `words` now holds 11 rows, ids 1–10 and 12 — **id 11 does not exist**, burned by the failed
+  duplicate INSERT used to test the constraint. Useful permanent fixture: any code that assumes
+  contiguous ids is visibly wrong against this table
+- Error envelope codes in use so far: `NOT_FOUND` (no such route), `WORD_NOT_FOUND`,
+  `INVALID_ID`, `INTERNAL_ERROR`. Milestone 6 will add a duplicate code (409) and at least one
+  validation code (400)
 
 ## Commands
 ```bash
@@ -211,6 +262,23 @@ wired to anything yet; the project currently only runs as a Node script via `tsx
   type-stripping (doesn't type-check)
 - Switched `package.json` to `"type": "module"` (ESM) to match `nodenext`/`verbatimModuleSyntax`
   in tsconfig, instead of forcing CommonJS syntax against it
+- Chose `UNIQUE (hanzi, zhuyin)` over `UNIQUE (hanzi)` (2026-08-26), so polyphonic characters
+  can hold two rows — the schema now encodes "a word is a character plus a reading"
+- Chose a hand-written `CreateWordInput` over `Omit<Word, "id">` (2026-08-26) — input and
+  output shapes are different contracts that only look alike today
+- `POST /words` response contract, decided 2026-08-26: **201** + `Location: /words/:id` on
+  success (not 200 — a new resource exists at a new address, and the client can't know the id);
+  **400** for a body missing a required field or carrying a wrong-typed one; **400** for a body
+  that isn't valid JSON at all; **409** for a duplicate `(hanzi, zhuyin)`; **500** for anything
+  unplanned. 409 rather than 400 because of the "who has to change" test — the request is
+  well-formed and would have succeeded before the conflicting row existed, so it is
+  state-dependent, not request-dependent
+- Duplicate handling, decided 2026-08-26 but NOT yet built: the **service** catches `23505` and
+  rethrows a domain error (`DuplicateWordError`); the **controller** maps that to 409. Rejected
+  letting the controller test `err.code === '23505'` directly — a Postgres SQLSTATE inside the
+  HTTP layer couples the two and breaks if the DB is ever swapped. Open sub-questions: where the
+  error class lives (`types/word.ts` is deliberately runtime-free and a class is runtime code),
+  and how to narrow `unknown` before reading `err.code`
 
 ## Known gotchas
 <!-- Environment/tooling traps hit during this project, so they don't get re-debugged from scratch. -->
@@ -344,6 +412,75 @@ wired to anything yet; the project currently only runs as a Node script via `tsx
   throws `ERR_HTTP_HEADERS_SENT`. Neither is visible to `tsc`
 - Express matches routes **top to bottom, first match wins**. A literal path registered below
   `"/:id"` is unreachable — `/words/search` gets looked up as a word with id `"search"`
+- **`req.body` is `undefined` until a body parser is registered.** An HTTP body arrives as a
+  stream of chunks on the socket; Express 5 reads none of it by default. `express.json()` is
+  also *conditional* — it only consumes the body when `Content-Type` is `application/json`, so
+  the same bytes sent as `text/plain` leave `req.body` untouched. Consequence:
+  `req.body.hanzi` on an undefined body throws a `TypeError`, which Express turns into a
+  **500** — a client mistake reported as a server fault
+- `pgm.sql()` takes a **string**, so nothing validates the SQL — not `tsc`, not
+  `node-pg-migrate`. Same boundary blindness as `pool.query()`. Worse for `down`, which is
+  **invisible**: a broken `down` still lets `migrate:up` run green and only fails months later
+  during a rollback, at the worst possible moment. `DROP CONSTRAINT;` alone is not a
+  statement — it is a clause of `ALTER TABLE` and needs both the table and the constraint name.
+  `pgm.addConstraint(...)` auto-generates a correct `down`; raw SQL is the deliberate choice
+  here for SQL practice
+- **A UNIQUE constraint cannot be added to a table that already violates it.** Check with
+  `GROUP BY <cols> HAVING COUNT(*) > 1` *before* running `migrate:up`, or the migration fails
+  and it looks like a constraint problem when it is a data problem
+- **IDENTITY sequences are non-transactional — `nextval` is not rolled back.** A failed INSERT
+  still burns its id (this is why `words` has no id 11). Deliberate: rolling back a sequence
+  would serialise concurrent inserts into a global lock. So ids are **unique but never
+  contiguous** — `COUNT(*)` and `MAX(id)` are unrelated numbers, and "next id = last id + 1"
+  is always wrong. Sequential public ids also leak business volume, which is why public systems
+  often expose a UUID instead
+- `INSERT` reports only a row count unless you add **`RETURNING`** — without it `result.rows`
+  is `[]`, so `.map(toWord)` silently yields `[]` with no error anywhere. Use an explicit
+  column list, not `RETURNING *`: `pool.query<WordRow>()` is an unchecked assertion, so a
+  column added by a later migration makes `*` and `WordRow` disagree invisibly
+- `INSERT INTO t VALUES (...)` **with no column list maps positionally onto the table's
+  declared column order**, starting at `id` — which is `GENERATED ALWAYS` and refuses a
+  supplied value. Always name the columns
+- **`pg` surfaces a unique violation as `err.code === '23505'`** (a string), with
+  `err.constraint` holding the name from the migration and `err.detail` naming the conflicting
+  key. Branch on the SQLSTATE, never the message text — messages are localised and reworded
+  between releases, codes are in the SQL standard. psql hides the code unless
+  `\set VERBOSITY verbose`. `pg` types these as plain `Error`, so `err.code` is not on the
+  type — narrowing `unknown` is on you
+- **Interpolating values into SQL is injection, and it breaks on ordinary data first.** The
+  meaning `"it's cold"` closes the string literal and produces a syntax error long before any
+  attacker shows up. Placeholders are not merely safer: `pg` sends values on a separate
+  protocol channel, so they are never parsed as SQL at all. Interpolating an *identifier you
+  wrote* (a column-list constant) is fine — the danger was never `${}`, it was whose data was
+  inside it
+- Interpolating an optional field yields the literal text `'undefined'` — a quoted **string**
+  bound for an `INTEGER` column, and for a text column it stores the four characters `null`
+  rather than SQL `NULL`. Pass `x ?? null` in a values array instead
+- **Six positional parameters of the same type is a bug waiting to happen**:
+  `createWord(hanzi, zhuyin, ...)` with the first two swapped is perfectly typed and stores the
+  word backwards. A single object parameter with named keys makes the mistake unrepresentable —
+  design beating vigilance
+- **A type with zero uses always typechecks, including a wrong one.** `CreateWordInput` sat
+  there with a bogus required `id` and `tsc` was green, because a type is only ever validated
+  against its call sites. Writing a type does not tell you it is right; wiring it into a caller
+  does — an argument for building bottom-up and *using* each piece immediately
+- **Types verify internal consistency, never intent.** A wrong return annotation goes green as
+  soon as you write a body that matches it; the compiler will always agree with you if you make
+  the code wrong in a matching way. Where it *does* help is where the data is already inside
+  the program — `TS2740: Type 'Word[]' is missing ... from type 'Word'` caught a `.map()` on an
+  insert precisely because both facts were fully known to it. Same file, same compiler: the
+  difference is which side of the boundary the mistake sits on. Removing the annotation would
+  have inferred `Promise<Word[]>` and compiled silently
+- `if (input === undefined)` on a required parameter is legal, typechecks, and **can never
+  fire** — comparing anything to `undefined` is allowed. A guard is only useful if it names the
+  value that might actually be missing (`result.rows[0]`, not the parameter)
+- `throw new Error()` with no message is barely better than `!` — it costs a stack trace and
+  gives no explanation. If the point of the explicit throw is "fail with a message you wrote",
+  write the message
+- **A test that passes can pass for the wrong reason.** Testing the new UNIQUE constraint by
+  inserting 水 proved nothing: 水 was not in the seed data, so the INSERT was a legitimately new
+  row. "It didn't error" and "the thing I was testing worked" are different claims — check the
+  precondition holds before trusting the result
 
 ## Feature ideas backlog
 <!-- Empty for now. As we move through milestones, options get proposed here and I pick which
@@ -574,3 +711,66 @@ parsing, request-body validation as a genuinely new problem (a body has many fie
 each be wrong, unlike one path param), 201 + `Location`, and the `hanzi` UNIQUE decision that
 has been open for three sessions — a duplicate insert is a 409, and that only exists if the
 constraint does.
+
+2026-08-26 — ~2 hrs — **Milestone 6 started; schema, type and service layers done.** Quiz was
+offered and skipped, so no retrieval data this session — the "why is `tsc` blind" question is
+now unasked-and-unanswered for a third session running and should open the next one.
+
+Opened by reproducing the failure, the move that worked on 2026-08-21: `POST /words` today
+returns the JSON 404 catch-all. Pedro traced the control flow to the right line in `app.ts`
+(correct, and the hard part) but predicted 400 rather than 404, and predicted the JSON body was
+readable — it is not. `grep` confirmed `express.json()` is registered nowhere, which set up the
+milestone: a body is a stream nobody has read yet.
+
+**Decisions made:** `UNIQUE (hanzi, zhuyin)` — composite, closing a question open since
+2026-08-17. Pedro first said `UNIQUE (hanzi)` and changed to the composite once 多音字 came up
+(行 xíng/háng, 樂 lè/yuè). `CreateWordInput` hand-written rather than `Omit<Word, "id">`, after
+testing the `Omit` against two futures: it would force clients to send `pinyin: null`, and a
+later `created_at` would make the exclusion list grow forever. Optional fields as `?: T | null`.
+Full `POST` response contract settled (201/400/400/409/500), including 409-not-400 via the "who
+has to change" test. Duplicate handling designed but not built: service catches `23505` and
+rethrows a domain error, controller maps it to 409 — chosen over putting a Postgres SQLSTATE in
+the HTTP layer.
+
+**Ten bugs, `tsc` green on eight.** The migration's `down` was `DROP CONSTRAINT;` — not a
+statement, and invisible until a rollback. `CreateWordInput` shipped with a required `id`, green
+because nothing imported it yet. Then `createWord` in one pass, with five at once: **values
+interpolated straight into the SQL string** (injection, and `"it's cold"` breaks it before any
+attacker does), no column list (positional mapping starting at the `GENERATED ALWAYS` `id`), no
+`RETURNING` (so it always returned `[]`), `Promise<Word[]>` instead of `Promise<Word>`, and
+quoted `'${undefined}'` headed for an `INTEGER`. Then a guard on `input === undefined` — a
+parameter that cannot be undefined — plus `return result` (the whole `QueryResult`) and an empty
+`throw new Error()`.
+
+The two `tsc` **did** catch were both TS2740, and both internal: `Word[]` and
+`QueryResult<WordRow>` against a declared `Promise<Word>`. Worth the contrast — the compiler saw
+those because the data was already inside the program, and was blind to the injection because
+that lived in a string headed out of it. Same function, same compiler. Also noted: the catch was
+only possible *because* the return type was annotated; without it the body would have inferred
+`Promise<Word[]>` and compiled silently.
+
+Process note: the agreed protocol (signature → typecheck → one line at a time) was skipped twice
+in favour of writing the whole body, which is exactly what let five bugs land together instead of
+one at a time. Flagged once, not laboured. Prediction-before-run was also skipped repeatedly;
+the one prediction Pedro did make was **exactly right and for the right reason** — id 12, because
+the failed duplicate INSERT had already burned 11.
+
+Two good empirical moments. The first constraint test "passed" while proving nothing (水 was not
+in the seed data, so it was a new row, not a duplicate) — a test passing for the wrong reason.
+And the duplicate error was then seen twice, once in psql and once as a live `pg` error object
+in Node (`code: '23505'`, `constraint: 'words_hanzi_zhuyin_unique'`, `detail: ...`), which is
+exactly the shape the controller will branch on.
+
+`createWord` has executed against the real DB and inserted 火 as id 12. Row 10's junk
+`water dupe` meaning was corrected by hand via `UPDATE` — deliberately *not* a migration, since
+it is data, not DDL. `scratch.ts` was gitignored rather than deleted this time: a permanent
+throwaway pad that can never accidentally ship.
+
+Committed as two commits, `.gitignore` and the `CLAUDE.md` update folded in rather than split
+into a separate chore commit, on Pedro's call.
+
+Next: `DuplicateWordError` — both sub-questions still open (where a runtime class lives given
+`types/word.ts` is type-only, and how to narrow `unknown` before reading `err.code`). Then
+validation (the genuinely new problem: many fields, each independently wrong, arriving as `any`),
+then controller, route, and `express.json()`. Still unanswered from this session: what the app
+does today with a truncated JSON body, and whether that status is right.

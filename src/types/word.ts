@@ -18,3 +18,12 @@ export interface Word {
   exampleSentence: string | null;
   tocflLevel: number | null;
 }
+
+export interface CreateWordInput {
+  hanzi: string;
+  zhuyin: string;
+  meaning: string;
+  pinyin?: string | null;
+  exampleSentence?: string | null;
+  tocflLevel?: number | null;
+}
